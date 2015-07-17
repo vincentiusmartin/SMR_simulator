@@ -40,6 +40,13 @@ pcache_map = []
 
 trace = open('in/trace.txt','r');
 
+# Monitoring variables
+#TODO: implement this
+numberOfClean = 0
+writesPutInPCache = 0
+sectorsPutInPCache = 0
+averageDirtyBandsPerClean = 0
+
 #===============================================================================================
 
 # Functions
