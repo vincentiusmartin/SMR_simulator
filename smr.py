@@ -89,7 +89,7 @@ def handleWrite(time, devno, blkno, blkcount):
     #write to persistent cache
     sys.stdout.write("{} {} {} {} {}\n".format(time, devno, current_pcache_idx, blkcount, 0))
     #create map
-    pcache_map.append([float(blkno),float(blkcount)]) #idx in pcache, original dest, req_size
+    pcache_map.append([float(blkno),float(blkcount)])
     #increment persistent cache idx
     current_pcache_idx += blkcount
         
