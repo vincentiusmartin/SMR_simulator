@@ -82,7 +82,7 @@ def handleWrite(time, devno, blkno, blkcount):
 
     global current_pcache_idx
     
-    #TODO: assign better handle for over-limit case
+    #TODO: assign better handling for over-limit case
     if (current_pcache_idx + blkcount > PCACHE_SIZE):
         raise HaltException("write size is larger than persistent cache limit! script terminated")
     
