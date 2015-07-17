@@ -55,17 +55,17 @@ class HaltException(Exception):
     pass
 
 def cleanPCache(time,devno):
-    
+    #print("startclean")
     global current_pcache_idx
-    dirty_band = []
+    dirty_band = set()
     
     for blkno,blkcount in pcache_map:
         starting_band = int(blkno / BAND_SIZE)
         band_count = int(math.ceil((blkcount + (blkno % BAND_SIZE)) / BAND_SIZE))
         #print(str(starting_band) + "&" + str(band_count) + " <-bandcount, blkno&blkcount-> " + str(blkno) + "&" + str(blkcount))
         for i in range (starting_band, starting_band + band_count):
-            dirty_band.append(i)
-            
+            dirty_band.add(i)
+          
     for band in dirty_band:
         starting_blkno = band * BAND_SIZE + PCACHE_SIZE
         #read
