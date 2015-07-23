@@ -56,6 +56,7 @@ writesPutInPCache = 0
 sectorsPutInPCache = 0
 #averageDirtyBandsPerClean = 0
 totalDirtyBands = 0
+totalRead = 0
 
 #===============================================================================================
 
@@ -128,6 +129,7 @@ def printSummary():
     print("------------Result Summary------------")
     print("Number of clean: " + str(numberOfClean))
     print("Total writes to persistent cache: " + str(writesPutInPCache))
+    print("Total read to disk: " + str(totalRead))
     print("Total sectors to persistent cache: " + str(sectorsPutInPCache))
     if numberOfClean > 0:
         print("Averages dirty bands per clean: " + str(float(totalDirtyBands) / numberOfClean));
@@ -148,6 +150,8 @@ if __name__ == "__main__":
         
         if flag == '1': #read
             result.write("{} {} {} {} {}\n".format(time, devno, blkno + PCACHE_SIZE, blkcount, flag))
+            #METRICS part - read to disk
+            totalRead += 1
         else: #write
             handleWrite(time,devno,blkno,blkcount)
         
