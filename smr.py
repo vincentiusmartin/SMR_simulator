@@ -15,7 +15,17 @@
 import os
 import sys
 import math
+import argparse
 from tqdm import *
+
+#===============================================================================================
+
+# Script's arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("file", help="trace file to process", nargs='?', type=argparse.FileType('r'), default=sys.stdin)
+parser.add_argument("-p","--pcsize", help="size of persistent cache", type=int, default=107374182400)
+parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
+args = parser.parse_args()
 
 #===============================================================================================
 
@@ -23,29 +33,29 @@ from tqdm import *
 
 # All bytes related variables use bytes as their units
 
-# Notes: flags - write -> 0 ; read -> 1
+# Notes: flags - write -> 0 ; read -> 1; last used pcsize 2147483648
 
 SECTOR_SIZE = 512 #default 512B
 
 #DISK_SIZE = 9437184 / SECTOR_SIZE #default 1TB-1099511627776
-PCACHE_SIZE = 25600 / SECTOR_SIZE #pcache in this script is tantamount to persistent_cache, default 100GB-107374182400
-BAND_SIZE = 5120 / SECTOR_SIZE #default 10MB-10485760
+PCACHE_SIZE = args.pcsize / SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
+BAND_SIZE = args.bandsize / SECTOR_SIZE #default 10MB-10485760
 
 # Disk element
 
 current_pcache_idx = 0
 pcache_map = []
 
-# Input file
+# Output file
 
-trace = open('in/trace.txt','r');
+result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrres.txt','w');
 
 # Monitoring variables
-#TODO: implement this
 numberOfClean = 0
 writesPutInPCache = 0
 sectorsPutInPCache = 0
-averageDirtyBandsPerClean = 0
+#averageDirtyBandsPerClean = 0
+totalDirtyBands = 0
 
 #===============================================================================================
 
@@ -57,7 +67,12 @@ class HaltException(Exception):
 def cleanPCache(time,devno):
     #print("startclean")
     global current_pcache_idx
+    global numberOfClean
+    global totalDirtyBands
     dirty_band = set()
+    
+    #METRICS part - increment number of clean
+    numberOfClean += 1
     
     for blkno,blkcount in pcache_map:
         starting_band = int(blkno / BAND_SIZE)
@@ -65,13 +80,15 @@ def cleanPCache(time,devno):
         #print(str(starting_band) + "&" + str(band_count) + " <-bandcount, blkno&blkcount-> " + str(blkno) + "&" + str(blkcount))
         for i in range (starting_band, starting_band + band_count):
             dirty_band.add(i)
+            #METRICS part - total dirty band, used for average dirty bands per clean
+            totalDirtyBands += 1
           
     for band in dirty_band:
         starting_blkno = band * BAND_SIZE + PCACHE_SIZE
         #read
-        sys.stdout.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
+        result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
         #write
-        sys.stdout.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))
+        result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))
     
     #clear pcache
     current_pcache_idx = 0
@@ -81,13 +98,18 @@ def cleanPCache(time,devno):
 def handleWrite(time, devno, blkno, blkcount):
 
     global current_pcache_idx
+    global writesPutInPCache
+    global sectorsPutInPCache
     
     #TODO: assign better handling for over-limit case
     if (current_pcache_idx + blkcount > PCACHE_SIZE):
         raise HaltException("write size is larger than persistent cache limit! script terminated")
     
     #write to persistent cache
-    sys.stdout.write("{} {} {} {} {}\n".format(time, devno, current_pcache_idx, blkcount, 0))
+    result.write("{} {} {} {} {}\n".format(time, devno, current_pcache_idx, blkcount, 0))
+    #METRICS part - writes and sectors put in persistent cache
+    writesPutInPCache += 1
+    sectorsPutInPCache += blkcount
     #create map
     pcache_map.append([float(blkno),float(blkcount)])
     #increment persistent cache idx
@@ -96,21 +118,40 @@ def handleWrite(time, devno, blkno, blkcount):
     if (current_pcache_idx >= 0.9 * PCACHE_SIZE):
         cleanPCache(time,devno)
 
+def printConfiguration():
+    print("------------Configuration------------")
+    print("Persistent cache size: " + str(PCACHE_SIZE))
+    print("Band size: " + str(BAND_SIZE))
+    print("-------------------------------------")
+
+def printSummary():
+    print("------------Result Summary------------")
+    print("Number of clean: " + str(numberOfClean))
+    print("Total writes to persistent cache: " + str(writesPutInPCache))
+    print("Total sectors to persistent cache: " + str(sectorsPutInPCache))
+    if numberOfClean > 0:
+        print("Averages dirty bands per clean: " + str(float(totalDirtyBands) / numberOfClean));
+    print("--------------------------------------")
+
 #===============================================================================================
 
-# Main loop
-
-for line in tqdm(trace):
-    token = line.split(" ")
-    time = token[0]
-    devno = token[1]
-    blkno = int(token[2].strip())
-    blkcount = int(token[3].strip())
-    flag = token[4].strip()
-    
-    if flag == '1': #read
-        sys.stdout.write("{} {} {} {} {}\n".format(time, devno, blkno + PCACHE_SIZE, blkcount, flag))
-    else: #write
-        handleWrite(time,devno,blkno,blkcount)
+# Main
+if __name__ == "__main__":
+    printConfiguration()
+    for line in tqdm(args.file):
+        token = line.split(" ")
+        time = token[0]
+        devno = token[1]
+        blkno = int(token[2].strip())
+        blkcount = int(token[3].strip())
+        flag = token[4].strip()
+        
+        if flag == '1': #read
+            result.write("{} {} {} {} {}\n".format(time, devno, blkno + PCACHE_SIZE, blkcount, flag))
+        else: #write
+            handleWrite(time,devno,blkno,blkcount)
+        
+    result.close()
+    printSummary()
         
 
