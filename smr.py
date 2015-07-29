@@ -25,6 +25,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("file", help="trace file to process", nargs='?', type=argparse.FileType('r'), default=sys.stdin)
 parser.add_argument("-p","--pcsize", help="size of persistent cache", type=int, default=107374182400)
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
+parser.add_argument("-s","--split", help="split the output to 2 traces: w/r to persistent cache and cleanup", action='store_true')
 args = parser.parse_args()
 
 #===============================================================================================
@@ -34,6 +35,8 @@ args = parser.parse_args()
 # All bytes related variables use bytes as their units
 
 # Notes: flags - write -> 0 ; read -> 1; last used pcsize 2147483648
+
+# Test mode size: pcache = 25600~50; band = 5120~10
 
 SECTOR_SIZE = 512 #default 512B
 
@@ -49,6 +52,10 @@ pcache_map = []
 # Output file
 
 result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrres.txt','w');
+
+result_cleanup = None
+if args.split:
+    result_cleanup = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrcleanup.txt','w');
 
 # Monitoring variables
 numberOfClean = 0
@@ -86,10 +93,16 @@ def cleanPCache(time,devno):
           
     for band in dirty_band:
         starting_blkno = band * BAND_SIZE + PCACHE_SIZE
-        #read
-        result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
-        #write
-        result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))
+        if result_cleanup is None:
+            #read
+            result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
+            #write
+            result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))
+        else:
+            #read
+            result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
+            #write
+            result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))        
     
     #clear pcache
     current_pcache_idx = 0
