@@ -73,7 +73,7 @@ class HaltException(Exception):
     pass
 
 def cleanPCache(time,devno):
-    #print("startclean")
+    result.write("startclean")
     global current_pcache_idx
     global numberOfClean
     global totalDirtyBands
@@ -107,7 +107,7 @@ def cleanPCache(time,devno):
     #clear pcache
     current_pcache_idx = 0
     del pcache_map[:]
-    #print("endclean")
+    result.write("endclean")
         
 def handleWrite(time, devno, blkno, blkcount):
 
