@@ -91,7 +91,7 @@ def cleanPCache(time,devno):
             #METRICS part - total dirty band, used for average dirty bands per clean
             totalDirtyBands += 1
           
-    for band in dirty_band:
+    for band in sorted(dirty_band):
         starting_blkno = band * BAND_SIZE + PCACHE_SIZE
         if result_cleanup is None:
             #read
