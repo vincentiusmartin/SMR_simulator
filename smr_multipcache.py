@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #title           :smr.py
-#description     :Simulate smr disk
+#description     :Simulate smr disk with multiple persistent cache
 #author          :Vincentius Martin
 #date            :-
 #version         :0.1
@@ -23,12 +23,16 @@ from tqdm import *
 # Script's arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("file", help="trace file to process", nargs='?', type=argparse.FileType('r'), default=sys.stdin)
-parser.add_argument("-p","--pcsize", help="size of persistent cache", type=int, default=107374182400)
+parser.add_argument("-p","--pcsize", help="size of a persistent cache unit", type=int, default="10485760")
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
+parser.add_argument("-c","--bandcount", help="count of bands that follow a persistent cache", type=int, default=9)
+parser.add_argument("-d","--disksize", help="size of disk", type=int, default=1099511627776)
 parser.add_argument("-s","--split", help="split the output to 2 traces: w/r to persistent cache and cleanup", action='store_true')
 args = parser.parse_args()
 
 #===============================================================================================
+
+#TODO:need more checking using other test cases + run in real traces
 
 # Define some constants
 
@@ -36,18 +40,24 @@ args = parser.parse_args()
 
 # Notes: flags - write -> 0 ; read -> 1; last used pcsize 2147483648
 
-# Test mode size: pcache = 25600~50; band = 5120~10
+# Test mode size: pcache = 25600~50; band = 5120~10; disk = 256000~50
 
 SECTOR_SIZE = 512 #default 512B
 
-#DISK_SIZE = 9437184 / SECTOR_SIZE #default 1TB-1099511627776
-PCACHE_SIZE = args.pcsize / SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
+DISK_SIZE = args.disksize / SECTOR_SIZE #default 1TB-1099511627776
+PCACHE_UNIT = args.pcsize / SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
 BAND_SIZE = args.bandsize / SECTOR_SIZE #default 10MB-10485760
+
+# Variables
+
+diskset_size = BAND_SIZE * args.bandcount + PCACHE_UNIT
+#TODO:compute persistent cache for remainder case
+TOTAL_PCACHE = DISK_SIZE // diskset_size * PCACHE_UNIT
 
 # Disk element
 
 current_pcache_idx = 0
-pcache_map = [] #blkno,blkcount
+pcache_map = []
 
 # Output file
 
@@ -73,26 +83,23 @@ class HaltException(Exception):
     pass
 
 def cleanPCache(time,devno):
-    #result.write("startclean")
+    result.write("start cleanup\n")
+    
     global current_pcache_idx
-    global numberOfClean
-    global totalDirtyBands
+
     dirty_band = set()
     
-    #METRICS part - increment number of clean
-    numberOfClean += 1
-    
     for blkno,blkcount in pcache_map:
-        starting_band = int(blkno / BAND_SIZE)
+        starting_band = int(blkno // BAND_SIZE)
         band_count = int(math.ceil((blkcount + (blkno % BAND_SIZE)) / BAND_SIZE))
-        #print(str(starting_band) + "&" + str(band_count) + " <-bandcount, blkno&blkcount-> " + str(blkno) + "&" + str(blkcount))
+        
+        result.write("bc " + str(band_count) + "\n")
+        
         for i in range (starting_band, starting_band + band_count):
             dirty_band.add(i)
-            #METRICS part - total dirty band, used for average dirty bands per clean
-            totalDirtyBands += 1
-          
+            
     for band in sorted(dirty_band):
-        starting_blkno = band * BAND_SIZE + PCACHE_SIZE
+        starting_blkno = band * BAND_SIZE + ((band * BAND_SIZE) // (BAND_SIZE * args.bandcount) + 1) * PCACHE_UNIT
         if result_cleanup is None:
             #read
             result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
@@ -102,57 +109,66 @@ def cleanPCache(time,devno):
             #read
             result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
             #write
-            result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))        
+            result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0)) 
     
     #clear pcache
     current_pcache_idx = 0
     del pcache_map[:]
-    #result.write("endclean")
+    
+    result.write("end cleanup\n")
+
+def handleRead(time, devno, blkno, blkcount):
+    #print "\n" + PCACHE_RATIO + " -- " + str(ratio)
+    
+    # count starting blkno
+    blkno += (blkno // (BAND_SIZE * args.bandcount) + 1) * PCACHE_UNIT
+    while blkcount > 0:
+        #avoid pcache if needed
+        if blkno % (diskset_size) == 0:
+            blkno += PCACHE_UNIT
+
+        #start_blk += (blkToBand(start_blk) // ratio[1] + 1) * BAND_SIZE
+        blktoread = 0
+        nearesttop = (blkno // (diskset_size) + 1) * diskset_size
+        #print nearesttop
+        #print("blkno " + str(blkno) + "-- nearesttop " + str(nearesttop))
+        if nearesttop - blkno >= blkcount:
+            blktoread = blkcount
+        else:
+            blktoread = nearesttop % blkno
+        result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktoread, 1))
+        blkcount -= blktoread
+        blkno += blktoread
         
 def handleWrite(time, devno, blkno, blkcount):
-
     global current_pcache_idx
-    global writesPutInPCache
-    global sectorsPutInPCache
-    
+
     #TODO: might need to create better handling for over-limit case
-    if (current_pcache_idx + blkcount > PCACHE_SIZE):
+    if (current_pcache_idx + blkcount > TOTAL_PCACHE):
         raise HaltException("write size is larger than persistent cache limit! script terminated")
-    
-    #write to persistent cache
-    result.write("{} {} {} {} {}\n".format(time, devno, current_pcache_idx, blkcount, 0))
-    #METRICS part - writes and sectors put in persistent cache
-    writesPutInPCache += 1
-    sectorsPutInPCache += blkcount
-    #create map
+
+    #note the request in pcache map
     pcache_map.append([float(blkno),float(blkcount)])
-    #increment persistent cache idx
-    current_pcache_idx += blkcount
+    
+    while blkcount > 0:
+        write_target = (current_pcache_idx // PCACHE_UNIT) * diskset_size + (current_pcache_idx % PCACHE_UNIT)
+        write_size = min(blkcount, PCACHE_UNIT - current_pcache_idx % PCACHE_UNIT)
+        #print str(write_target) + "<- target and size ->" + str(write_size)
+        #write to persistent cache
+        result.write("{} {} {} {} {}\n".format(time, devno, write_target, write_size, 0))
+        #update variables
+        current_pcache_idx += write_size
+        blkcount -= write_size
         
-    if (current_pcache_idx >= 0.9 * PCACHE_SIZE):
+    #if needed, cleanup
+    if (current_pcache_idx >= 0.9 * TOTAL_PCACHE):
         cleanPCache(time,devno)
-
-def printConfiguration():
-    print("------------Configuration------------")
-    print("Persistent cache size: " + str(PCACHE_SIZE))
-    print("Band size: " + str(BAND_SIZE))
-    print("-------------------------------------")
-
-def printSummary():
-    print("------------Result Summary------------")
-    print("Number of clean: " + str(numberOfClean))
-    print("Total writes to persistent cache: " + str(writesPutInPCache))
-    print("Total read to disk: " + str(totalRead))
-    print("Total sectors to persistent cache: " + str(sectorsPutInPCache))
-    if numberOfClean > 0:
-        print("Averages dirty bands per clean: " + str(float(totalDirtyBands) / numberOfClean));
-    print("--------------------------------------")
 
 #===============================================================================================
 
 # Main
 if __name__ == "__main__":
-    printConfiguration()
+    #printConfiguration()
     for line in tqdm(args.file):
         token = line.split(" ")
         time = token[0]
@@ -162,13 +178,13 @@ if __name__ == "__main__":
         flag = token[4].strip()
         
         if flag == '1': #read
-            result.write("{} {} {} {} {}\n".format(time, devno, blkno + PCACHE_SIZE, blkcount, flag))
+            handleRead(time, devno, blkno, blkcount)
             #METRICS part - read to disk
             totalRead += 1
         else: #write
-            handleWrite(time,devno,blkno,blkcount)
+            handleWrite(time, devno, blkno, blkcount)
         
     result.close()
-    printSummary()
+    #printSummary()
         
 
