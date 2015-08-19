@@ -42,6 +42,7 @@ args = parser.parse_args()
 
 # Test mode size: pcache = 25600~50; band = 5120~10; disk = 256000~500
 # python smr_multipcache.py in/trace2.txt -u 5120 -t 25600 -b 5120 -d 256000
+# Real mode: python smr_multipcache.py in/disk4_t10.txt -u 106954752 -t 10737418240 -b 41943040 -d 107374182400
 
 SECTOR_SIZE = 512 #default 512B
 
