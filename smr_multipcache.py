@@ -27,12 +27,11 @@ parser.add_argument("-u","--pcunit", help="size of a persistent cache unit", typ
 parser.add_argument("-t","--pctotal", help="total size of the whole persistent cache", type=int, default="10737418240")
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
 parser.add_argument("-d","--disksize", help="size of disk", type=int, default=1099511627776)
+parser.add_argument("-p","--policy", help="A,B,shelter", type=str, default="A")
 parser.add_argument("-s","--split", help="split the output to 2 traces: w/r to persistent cache and cleanup", action='store_true')
 args = parser.parse_args()
 
 #===============================================================================================
-
-#TODO:need more checking using other test cases + run in real traces
 
 # Define some constants
 
@@ -40,29 +39,35 @@ args = parser.parse_args()
 
 # Notes: flags - write -> 0 ; read -> 1; last used pcunit 2147483648
 
+# Policy Notes:
+# 1. POL-A lastTail=latest read - many caches clean
+# 2. POL-B write W to its nearest band's log - single cache clean
+# 3. Sheltering, small write go to shelter near last tail (offset + size) of the latest big IO
+
 # Test mode size: pcache = 25600~50; band = 5120~10; disk = 256000~500
-# python smr_multipcache.py in/trace2.txt -u 5120 -t 25600 -b 5120 -d 256000
+# Test mode: python smr_multipcache.py in/trace2.txt -u 5120 -t 25600 -b 5120 -d 256000
 # Real mode: python smr_multipcache.py in/disk4_t10.txt -u 106954752 -t 10737418240 -b 41943040 -d 107374182400
 
 SECTOR_SIZE = 512 #default 512B
 
-DISK_SIZE = args.disksize / SECTOR_SIZE #default 1TB-1099511627776
-PCACHE_UNIT = args.pcunit / SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
-BAND_SIZE = args.bandsize / SECTOR_SIZE #default 10MB-10485760
-TOTAL_PCACHE = args.pctotal / SECTOR_SIZE #default 10GB - 10737418240
+# Constants
+DISK_SIZE = args.disksize // SECTOR_SIZE #default 1TB-1099511627776
+PCACHE_UNIT = args.pcunit // SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
+BAND_SIZE = args.bandsize // SECTOR_SIZE #default 10MB-10485760
+TOTAL_PCACHE = args.pctotal // SECTOR_SIZE #default 10GB - 10737418240
 
 # Variables
 diskset_size = DISK_SIZE // (TOTAL_PCACHE // PCACHE_UNIT) #give temporary value first
-band_unit = (diskset_size - PCACHE_UNIT) // BAND_SIZE
-diskset_size = BAND_SIZE * band_unit + PCACHE_UNIT
+band_unit = (diskset_size - PCACHE_UNIT) // BAND_SIZE #how many bands follow a persistent cache
+diskset_size = BAND_SIZE * band_unit + PCACHE_UNIT #size of persistent cache + bands in a set before the next pcache
+last_tail = 0 #last tail depends on policy -- (offset + size)
 
 #diskset_size = BAND_SIZE * band_count + PCACHE_UNIT
 #need to compute persistent cache for remainder case
 #TOTAL_PCACHE = DISK_SIZE // diskset_size * PCACHE_UNIT
 
 # Disk element
-current_pcache_idx = 0
-pcache_map = []
+pcache = [list() for _ in xrange(DISK_SIZE // diskset_size)]
 
 # Output file
 result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrres.txt','w');
@@ -86,25 +91,47 @@ totalRead = 0
 class HaltException(Exception):
     pass
 
-def cleanPCache(time,devno):
-    global current_pcache_idx
+# --------Start of Computation Functions--------
+
+def nextIdxPCacheN(n):
+    return int(sum(io[1] for io in pcache[n]))
+
+def computeDiskBlkNo(blkno): #basically, this function means we add with the size of n pcache_unit before
+    return blkno + (blkno // (BAND_SIZE * band_unit) + 1) * PCACHE_UNIT
+
+# --------End of Computation Functions--------
+
+# --------Start of Read,Write,Clean--------
+
+#idx = -1 = whole
+def cleanPCache(time,devno,punit_idx = -1):
     global numberOfClean
     global totalDirtyBands
-
-    dirty_band = set()
+    global pcache
     
+    dirty_band = set()
     #METRICS part - increment number of clean
     numberOfClean += 1
     
-    for blkno,blkcount in pcache_map:
-        starting_band = int(blkno // BAND_SIZE)
-        band_count = int(math.ceil((blkcount + (blkno % BAND_SIZE)) / BAND_SIZE))
-        
-        for i in range (starting_band, starting_band + band_count):
-            dirty_band.add(i)    
-            #METRICS part - total dirty band, used for average dirty bands per clean
-            totalDirtyBands += 1  
-            
+    if punit_idx == -1: #whole clean
+        for punit in pcache:
+            for blkno,blkcount in punit:
+                starting_band = int(blkno // BAND_SIZE)
+                band_count = int(math.ceil((blkcount + (blkno % BAND_SIZE)) / BAND_SIZE))
+                #print "\n"+str(blkno) + "--" + str(blkcount) + "--"+str(starting_band) + "--" + str(band_count)
+                for i in range (starting_band, starting_band + band_count):
+                    dirty_band.add(i)    
+                    #METRICS part - total dirty band, used for average dirty bands per clean
+                    totalDirtyBands += 1  
+    else: #single clean
+        for blkno,blkcount in pcache[punit_idx]:
+            starting_band = int(blkno // BAND_SIZE)
+            band_count = int(math.ceil((blkcount + (blkno % BAND_SIZE)) / BAND_SIZE))
+            for i in range (starting_band, starting_band + band_count):
+                dirty_band.add(i)    
+                #METRICS part - total dirty band, used for average dirty bands per clean
+                totalDirtyBands += 1 
+                
     for band in sorted(dirty_band):
         starting_blkno = band * BAND_SIZE + ((band * BAND_SIZE) // (BAND_SIZE * band_unit) + 1) * PCACHE_UNIT
         if result_cleanup is None:
@@ -117,29 +144,30 @@ def cleanPCache(time,devno):
             result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
             #write
             result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0)) 
-    
+
     #clear pcache
-    current_pcache_idx = 0
-    del pcache_map[:]
+    if punit_idx == -1: #whole clean
+        pcache = [list() for _ in xrange(DISK_SIZE // diskset_size)]
+    else: #single clean
+        del pcache[punit_idx][:]
 
 def handleRead(time, devno, blkno, blkcount):
+    global last_tail
     global totalRead
     
     #METRICS part - increment total read
     totalRead += 1
     
-    # count starting blkno
-    blkno += (blkno // (BAND_SIZE * band_unit) + 1) * PCACHE_UNIT
+    #count starting blkno by skipping persistent caches
+    blkno = computeDiskBlkNo(blkno)
     while blkcount > 0:
-        #avoid pcache if needed
+        #avoid a pcache if the request is on the edge
         if blkno % (diskset_size) == 0:
             blkno += PCACHE_UNIT
 
-        #start_blk += (blkToBand(start_blk) // ratio[1] + 1) * BAND_SIZE
         blktoread = 0
         nearesttop = (blkno // (diskset_size) + 1) * diskset_size
-        #print nearesttop
-        #print("blkno " + str(blkno) + "-- nearesttop " + str(nearesttop))
+
         if nearesttop - blkno >= blkcount:
             blktoread = blkcount
         else:
@@ -147,36 +175,49 @@ def handleRead(time, devno, blkno, blkcount):
         result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktoread, 1))
         blkcount -= blktoread
         blkno += blktoread
+    
+    #if policy A, save the tail
+    if args.policy == "A":
+        last_tail = blkno - 1
         
 def handleWrite(time, devno, blkno, blkcount):
-    global current_pcache_idx
     global writesPutInPCache
     global sectorsPutInPCache
+    global pcache
 
     #METRICS part - writes and sectors put in persistent cache
     writesPutInPCache += 1
     sectorsPutInPCache += blkcount
 
-    #TODO: might need to create better handling for over-limit case
-    if (current_pcache_idx + blkcount > TOTAL_PCACHE):
-        raise HaltException("write size is larger than persistent cache limit! script terminated")
+    idx_point = -1 #unassigned
+    if args.policy == "A":
+        idx_point = last_tail
+    elif args.policy == "B":
+        idx_point = computeDiskBlkNo(blkno)
 
-    #firstly, note the request in pcache map
-    pcache_map.append([float(blkno),float(blkcount)])
+    #TODO: if needed do the overlimit case here
     
     while blkcount > 0:
-        write_target = (current_pcache_idx // PCACHE_UNIT) * diskset_size + (current_pcache_idx % PCACHE_UNIT)
-        write_size = min(blkcount, PCACHE_UNIT - current_pcache_idx % PCACHE_UNIT)
-        #print str(write_target) + "<- target and size ->" + str(write_size)
-        #write to persistent cache
+        write_target = -1 #unassigned
+        write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)
+            
+        write_size = min(blkcount, PCACHE_UNIT - nextIdxPCacheN(idx_point // diskset_size))
+        #write to pcache
         result.write("{} {} {} {} {}\n".format(time, devno, write_target, write_size, 0))
-        #update variables
-        current_pcache_idx += write_size
+        pcache[idx_point // diskset_size].append([float(blkno),float(write_size)])
+        #---------------
         blkcount -= write_size
+        blkno += write_size
         
-    #if needed, cleanup
-    if (current_pcache_idx >= 0.9 * TOTAL_PCACHE):
-        cleanPCache(time,devno)
+        if nextIdxPCacheN(idx_point // diskset_size) == PCACHE_UNIT:
+            if args.policy == "A":        
+                cleanPCache(time,devno)
+            elif args.policy == "B":
+                cleanPCache(time,devno,idx_point // diskset_size) 
+
+# --------End of Read,Write,Clean--------
+
+# --------Start of User Messages--------
         
 def printConfiguration():
     print("------------Configuration------------")
@@ -195,6 +236,8 @@ def printSummary():
     if numberOfClean > 0:
         print("Averages dirty bands per clean: " + str(float(totalDirtyBands) / numberOfClean));
     print("--------------------------------------")
+    
+# --------End of User Messages--------
 
 #===============================================================================================
 
@@ -216,5 +259,4 @@ if __name__ == "__main__":
         
     result.close()
     printSummary()
-        
-
+    
