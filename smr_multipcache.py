@@ -179,8 +179,10 @@ def handleRead(time, devno, blkno, blkcount):
     #if policy A, save the tail
     if args.policy == "A":
         last_tail = blkno - 1
-        
-def handleWrite(time, devno, blkno, blkcount):
+    #if shelter and largeIO
+
+#TODO: if shelter, do shelter write first        
+def handleDefaultWrite(time, devno, blkno, blkcount):
     global writesPutInPCache
     global sectorsPutInPCache
     global pcache
@@ -214,6 +216,8 @@ def handleWrite(time, devno, blkno, blkcount):
                 cleanPCache(time,devno)
             elif args.policy == "B":
                 cleanPCache(time,devno,idx_point // diskset_size) 
+                
+        #TODO: if shelter and largeIO -> save tail
 
 # --------End of Read,Write,Clean--------
 
@@ -255,7 +259,7 @@ if __name__ == "__main__":
         if flag == '1': #read
             handleRead(time, devno, blkno, blkcount)
         else: #write
-            handleWrite(time, devno, blkno, blkcount)
+            handleDefaultWrite(time, devno, blkno, blkcount)
         
     result.close()
     printSummary()
