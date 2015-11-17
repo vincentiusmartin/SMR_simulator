@@ -23,8 +23,9 @@ from tqdm import *
 # Script's arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("file", help="trace file to process", nargs='?', type=argparse.FileType('r'), default=sys.stdin)
-parser.add_argument("-u","--pcunit", help="size of a persistent cache unit", type=int, default="10485760")
-parser.add_argument("-t","--pctotal", help="total size of the whole persistent cache", type=int, default="10737418240")
+parser.add_argument("-l","--log", help="size of a persistent cache log", type=int, default="10485760")
+#parser.add_argument("-t","--pctotal", help="total size of the whole persistent cache", type=int, default="10737418240")
+parser.add_argument("-g","--group", help="every n group size", type=int, default="104857600")
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
 parser.add_argument("-d","--disksize", help="size of disk", type=int, default=1099511627776)
 parser.add_argument("-p","--policy", help="A,B,shelter", type=str, default="A")
@@ -46,33 +47,32 @@ args = parser.parse_args()
 # 3. Sheltering, small write go to shelter near last tail (offset + size) of the latest big IO
 
 # Test mode size: pcache = 25600~50; band = 5120~10; disk = 256000~500
-# Test mode: python smr_multipcache.py in/trace2.txt -u 5120 -t 25600 -b 5120 -d 256000
+# Test mode: python smr_multipcache.py in/trace2.txt -l 5120 -g 51200 -b 5120 -d 256000
 # Real mode: python smr_multipcache.py in/disk4_t10.txt -u 106954752 -t 10737418240 -b 41943040 -d 107374182400
 
 SECTOR_SIZE = 512 #default 512B
 
 # Constants
 DISK_SIZE = args.disksize // SECTOR_SIZE #default 1TB-1099511627776
-PCACHE_UNIT = args.pcunit // SECTOR_SIZE #pcache is tantamount to persistent_cache, default 100GB-107374182400
+PCACHE_UNIT = args.log // SECTOR_SIZE #tantamount to persistent_cache, default 100GB-107374182400
 BAND_SIZE = args.bandsize // SECTOR_SIZE #default 10MB-10485760
-TOTAL_PCACHE = args.pctotal // SECTOR_SIZE #default 10GB - 10737418240
+TOTAL_PCACHE = ((args.disksize // args.group) * args.log) / 512 #default 10GB - 10737418240
 SMALL_IO_SIZE = 32 #in KB
 
 # Variables
-diskset_size = DISK_SIZE // (TOTAL_PCACHE // PCACHE_UNIT) #give temporary value first
-band_unit = (diskset_size - PCACHE_UNIT) // BAND_SIZE #how many bands follow a persistent cache
-diskset_size = BAND_SIZE * band_unit + PCACHE_UNIT #size of persistent cache + bands in a set before the next pcache
-last_tail = 0 #last tail depends on policy -- (offset + size)
+#diskset_size = DISK_SIZE // (TOTAL_PCACHE // PCACHE_UNIT) #give temporary value first
+#band_unit = (diskset_size - PCACHE_UNIT) // BAND_SIZE #how many bands follow a persistent cache
+#diskset_size = BAND_SIZE * band_unit + PCACHE_UNIT #size of persistent cache + bands in a set before the next pcache
 
-#diskset_size = BAND_SIZE * band_count + PCACHE_UNIT
-#need to compute persistent cache for remainder case
-#TOTAL_PCACHE = DISK_SIZE // diskset_size * PCACHE_UNIT
+band_unit = (args.group - args.log) // args.bandsize;
+diskset_size = args.group // SECTOR_SIZE
+last_tail = 0 #last tail depends on policy -- (offset + size)
 
 # Disk element
 pcache = [list() for _ in xrange(DISK_SIZE // diskset_size)]
 
 # Output file
-result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrres.txt','w');
+result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrmultires.txt','w');
 
 result_cleanup = None
 if args.split:
@@ -135,7 +135,7 @@ def cleanPCache(time,devno,punit_idx = -1):
                 totalDirtyBands += 1 
                 
     for band in sorted(dirty_band):
-        starting_blkno = band * BAND_SIZE + ((band * BAND_SIZE) // (BAND_SIZE * band_unit) + 1) * PCACHE_UNIT
+        starting_blkno = band * BAND_SIZE + (band // band_unit + 1) * PCACHE_UNIT
         if result_cleanup is None:
             #read
             result.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 1))
@@ -199,9 +199,8 @@ def handleDefaultWrite(time, devno, blkno, blkcount):
         idx_point = computeDiskBlkNo(blkno)
     else: #policy A or shelter
         idx_point = last_tail
-
-    #TODO: if needed do the overlimit case here
     
+    #TODO: if needed do the overlimit case here
     while blkcount > 0:
         write_target = -1 #unassigned
         write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)

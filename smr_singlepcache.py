@@ -26,6 +26,7 @@ parser.add_argument("file", help="trace file to process", nargs='?', type=argpar
 parser.add_argument("-p","--pcsize", help="size of persistent cache", type=int, default=107374182400)
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
 parser.add_argument("-s","--split", help="split the output to 2 traces: w/r to persistent cache and cleanup", action='store_true')
+parser.add_argument("-n","--noclean", help="disable clean", action='store_true')
 args = parser.parse_args()
 
 #===============================================================================================
@@ -51,7 +52,7 @@ pcache_map = [] #blkno,blkcount
 
 # Output file
 
-result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrres.txt','w');
+result = open('out/' + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + '_smrsingleres.txt','w');
 
 result_cleanup = None
 if args.split:
@@ -72,9 +73,14 @@ totalRead = 0
 class HaltException(Exception):
     pass
 
+def clearPCache():
+    global current_pcache_idx
+    
+    current_pcache_idx = 0
+    del pcache_map[:]
+
 def cleanPCache(time,devno):
     #result.write("startclean")
-    global current_pcache_idx
     global numberOfClean
     global totalDirtyBands
     dirty_band = set()
@@ -105,8 +111,7 @@ def cleanPCache(time,devno):
             result_cleanup.write("{} {} {} {} {}\n".format(time, devno, starting_blkno, BAND_SIZE, 0))        
     
     #clear pcache
-    current_pcache_idx = 0
-    del pcache_map[:]
+    clearPCache()
     #result.write("endclean")
         
 def handleWrite(time, devno, blkno, blkcount):
@@ -130,7 +135,10 @@ def handleWrite(time, devno, blkno, blkcount):
     current_pcache_idx += blkcount
         
     if (current_pcache_idx >= 0.9 * PCACHE_SIZE):
-        cleanPCache(time,devno)
+        if args.noclean:
+            clearPCache()
+        else:
+            cleanPCache(time,devno)
 
 def printConfiguration():
     print("------------Configuration------------")
