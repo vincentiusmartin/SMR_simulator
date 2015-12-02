@@ -142,8 +142,8 @@ def handleWrite(time, devno, blkno, blkcount):
 
 def printConfiguration():
     print("------------Configuration------------")
-    print("Persistent cache size: " + str(PCACHE_SIZE))
-    print("Band size: " + str(BAND_SIZE))
+    print("Persistent cache size: " + str(PCACHE_SIZE * SECTOR_SIZE / 1048576) + " MB")
+    print("Band size: " + str(BAND_SIZE * SECTOR_SIZE / 1048576) + " MB")
     print("-------------------------------------")
 
 def printSummary():

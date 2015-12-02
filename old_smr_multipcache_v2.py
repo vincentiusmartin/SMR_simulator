@@ -156,18 +156,34 @@ def cleanPCache(time,devno,punit_idx = -1):
 def handleRead(time, devno, blkno, blkcount):
     global last_tail
     global totalRead
-   
+    
+    #save for tail
+    init_blkcount = blkcount
+    
     #METRICS part - increment total read
     totalRead += 1
     
-    #start of the read part
+    #count starting blkno by skipping persistent caches
     blkno = computeDiskBlkNo(blkno)
-    result.write("{} {} {} {} {}\n".format(time, devno, blkno, blkcount, 1))
-    #end of the read part
+    while blkcount > 0:
+        #avoid a pcache if the request is on the edge
+        if blkno % (diskset_size) == 0:
+            blkno += PCACHE_UNIT
+
+        blktoread = 0
+        nearesttop = (blkno // (diskset_size) + 1) * diskset_size
+
+        if nearesttop - blkno >= blkcount:
+            blktoread = blkcount
+        else:
+            blktoread = nearesttop % blkno
+        result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktoread, 1))
+        blkcount -= blktoread
+        blkno += blktoread
     
     #if policy A or (shelter and bigIO), save the tail
-    if args.policy == "A" or (args.policy == "shelter" and blkcount * 0.5 > SMALL_IO_SIZE):
-        last_tail = (blkcount + blkno)
+    if args.policy == "A" or (args.policy == "shelter" and init_blkcount * 0.5 > SMALL_IO_SIZE):
+        last_tail = blkno - 1
        
 def handleDefaultWrite(time, devno, blkno, blkcount):
     global writesPutInPCache
@@ -182,25 +198,29 @@ def handleDefaultWrite(time, devno, blkno, blkcount):
     if args.policy == "B":
         idx_point = computeDiskBlkNo(blkno)
     else: #policy A or shelter
-        idx_point = last_tail  
-
-    #clean if not enough space
-    if nextIdxPCacheN(idx_point // diskset_size) + blkcount > PCACHE_UNIT:
-        if args.noclean: #NoClean just imagine the log is like a "circular buffer"
-            del pcache[idx_point // diskset_size][:] #reset the offset to zero
-        else: #do cleanup!
-            if args.policy == "B":   
-                cleanPCache(time,devno,idx_point // diskset_size)     
-            else: #args.policy == "A" or shelter
-                cleanPCache(time,devno)
+        idx_point = last_tail
     
-    #start of the write part
-    write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)
-
-    result.write("{} {} {} {} {}\n".format(time, devno, write_target, blkcount, 0))
-    pcache[idx_point // diskset_size].append([float(blkno),float(blkcount)])
-    #end of the write part
-
+    #TODO: if needed do the overlimit case here
+    while blkcount > 0:
+        write_target = -1 #unassigned
+        write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)
+            
+        write_size = min(blkcount, PCACHE_UNIT - nextIdxPCacheN(idx_point // diskset_size))
+        #write to pcache
+        result.write("{} {} {} {} {}\n".format(time, devno, write_target, write_size, 0))
+        pcache[idx_point // diskset_size].append([float(blkno),float(write_size)])
+        #---------------
+        blkcount -= write_size
+        blkno += write_size
+        
+        if nextIdxPCacheN(idx_point // diskset_size) == PCACHE_UNIT:
+            if args.noclean: #NoClean just imagine the log is like a "circular buffer"
+                del pcache[idx_point // diskset_size][:] #basically this is tantamount to reset the offset to zero
+            else: #do cleanup!
+                if args.policy == "B":   
+                    cleanPCache(time,devno,idx_point // diskset_size)     
+                else: #args.policy == "A" or shelter
+                    cleanPCache(time,devno)
 
 def handleShelterWrite(time, devno, blkno, blkcount):
     global last_tail
@@ -210,9 +230,24 @@ def handleShelterWrite(time, devno, blkno, blkcount):
     else: #bigIO
         #basically, just copy paste from read and some trivial changes
         blkno = computeDiskBlkNo(blkno)
-        result.write("{} {} {} {} {}\n".format(time, devno, blkno, blkcount, 0))
-        #end of the read part
-        last_tail = (blkcount + blkno)
+        while blkcount > 0:
+            #avoid a pcache if the request is on the edge
+            if blkno % (diskset_size) == 0:
+                blkno += PCACHE_UNIT
+
+            blktowrite = 0
+            nearesttop = (blkno // (diskset_size) + 1) * diskset_size
+
+            if nearesttop - blkno >= blkcount:
+                blktowrite = blkcount
+            else:
+                blktowrite = nearesttop % blkno
+            result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktowrite, 0))
+            blkcount -= blktowrite
+            blkno += blktowrite
+
+        #shelter, bigIO, we know we should save the tail :)
+        last_tail = blkno - 1
 
 # --------End of Read,Write,Clean--------
 
@@ -220,8 +255,8 @@ def handleShelterWrite(time, devno, blkno, blkcount):
         
 def printConfiguration():
     print("------------Configuration------------")
-    print("Persistent cache size: " + "%.3f" % (float(TOTAL_PCACHE * SECTOR_SIZE) / 1048576) + " MB")
-    print("Band size: " + "%.3f" % (float(BAND_SIZE * SECTOR_SIZE) / 1048576) + " MB")
+    print("Persistent cache size: " + str(TOTAL_PCACHE * SECTOR_SIZE / 1048576) + " MB")
+    print("Band size: " + str(BAND_SIZE * SECTOR_SIZE / 1048576) + " MB")
     print("Bands that follow a persistent cache unit: " + str(band_unit))
     print("Total shelters: " + str(DISK_SIZE / diskset_size))
     print("-------------------------------------")
