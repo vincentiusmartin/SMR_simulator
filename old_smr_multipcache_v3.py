@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 #title           :smr.py
-#description     :Simulate smr disk with multiple persistent cache -- jump over every log
+#description     :Simulate smr disk with multiple persistent cache -- don't care about the logs position when writing
+#                 Only reset without log swap (NoClean just imagine the log is like a "circular buffer")
 #author          :Vincentius Martin
 #date            :-
 #version         :0.1
@@ -28,7 +29,7 @@ parser.add_argument("-l","--log", help="size of a persistent cache log", type=in
 parser.add_argument("-g","--group", help="every n group size", type=int, default="104857600")
 parser.add_argument("-b","--bandsize", help="size of band", type=int, default=10485760)
 parser.add_argument("-d","--disksize", help="size of disk", type=int, default=1099511627776)
-parser.add_argument("-p","--policy", help="A,B,shelter", type=str, default="A")
+parser.add_argument("-p","--policy", help="A,B,C,shelter", type=str, default="A")
 parser.add_argument("-n","--noclean", help="disable clean", action='store_true')
 parser.add_argument("-s","--split", help="split the output to 2 traces: w/r to persistent cache and cleanup", action='store_true')
 args = parser.parse_args()
@@ -44,7 +45,8 @@ args = parser.parse_args()
 # Policy Notes:
 # 1. POL-A lastTail=latest read - many caches clean
 # 2. POL-B write W to its nearest band's log - single cache clean
-# 3. Sheltering, small write go to shelter near last tail (offset + size) of the latest big IO
+# 3. POL-C lastTail = latest non-logged I/O (all reads OR big writes)
+# 4. Sheltering, small write go to shelter near last tail (offset + size) of the latest big IO
 
 # Test mode size: pcache = 25600~50; band = 5120~10; disk = 256000~500
 # Test mode: python smr_multipcache.py in/trace2.txt -l 5120 -g 51200 -b 5120 -d 256000
@@ -82,6 +84,7 @@ if args.split:
 numberOfClean = 0
 writesPutInPCache = 0
 sectorsPutInPCache = 0
+sectorsToEachLog = [0 for _ in xrange(DISK_SIZE // diskset_size)]
 #averageDirtyBandsPerClean = 0
 totalDirtyBands = 0
 totalRead = 0
@@ -107,13 +110,10 @@ def computeDiskBlkNo(blkno): #basically, this function means we add with the siz
 
 #idx = -1 = whole
 def cleanPCache(time,devno,punit_idx = -1):
-    global numberOfClean
     global totalDirtyBands
     global pcache
     
     dirty_band = set()
-    #METRICS part - increment number of clean
-    numberOfClean += 1
     
     if punit_idx == -1: #whole clean
         for punit in pcache:
@@ -150,46 +150,33 @@ def cleanPCache(time,devno,punit_idx = -1):
     #clear pcache
     if punit_idx == -1: #whole clean
         pcache = [list() for _ in xrange(DISK_SIZE // diskset_size)]
-    else: #single clean
+    else: #single cleanlog_occupancy.txt
         del pcache[punit_idx][:]
 
 def handleRead(time, devno, blkno, blkcount):
     global last_tail
     global totalRead
-    
-    #save for tail
-    init_blkcount = blkcount
-    
+   
     #METRICS part - increment total read
     totalRead += 1
     
-    #count starting blkno by skipping persistent caches
+    #start of the read part
     blkno = computeDiskBlkNo(blkno)
-    while blkcount > 0:
-        #avoid a pcache if the request is on the edge
-        if blkno % (diskset_size) == 0:
-            blkno += PCACHE_UNIT
-
-        blktoread = 0
-        nearesttop = (blkno // (diskset_size) + 1) * diskset_size
-
-        if nearesttop - blkno >= blkcount:
-            blktoread = blkcount
-        else:
-            blktoread = nearesttop % blkno
-        result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktoread, 1))
-        blkcount -= blktoread
-        blkno += blktoread
+    result.write("{} {} {} {} {}\n".format(time, devno, blkno, blkcount, 1))
+    #end of the read part
     
     #if policy A or (shelter and bigIO), save the tail
-    if args.policy == "A" or (args.policy == "shelter" and init_blkcount * 0.5 > SMALL_IO_SIZE):
-        last_tail = blkno - 1
+    if args.policy == "A" or args.policy == "C" or (args.policy == "shelter" and blkcount * 0.5 > SMALL_IO_SIZE):
+        last_tail = (blkcount + blkno)
        
 def handleDefaultWrite(time, devno, blkno, blkcount):
+#DEFAULT: write goes to the persistent cache / log
     global writesPutInPCache
     global sectorsPutInPCache
     global pcache
-
+    global last_tail
+    global numberOfClean
+    
     #METRICS part - writes and sectors put in persistent cache
     writesPutInPCache += 1
     sectorsPutInPCache += blkcount
@@ -197,73 +184,68 @@ def handleDefaultWrite(time, devno, blkno, blkcount):
     idx_point = -1 #unassigned
     if args.policy == "B":
         idx_point = computeDiskBlkNo(blkno)
-    else: #policy A or shelter
-        idx_point = last_tail
+    else: #policy A or policy C or shelter
+        idx_point = last_tail  
+
+    #clean or reset if not enough space
+    if nextIdxPCacheN(idx_point // diskset_size) + blkcount > PCACHE_UNIT:
+        #METRICS part - increment number of clean
+        numberOfClean += 1
+        if args.noclean: #NoClean just imagine the log is like a "circular buffer"
+            del pcache[idx_point // diskset_size][:] #reset the offset to zero
+        else: #do cleanup!
+            if args.policy == "B":
+                cleanPCache(time,devno,idx_point // diskset_size)     
+            else: #args.policy == "A" or "C" or shelter
+                cleanPCache(time,devno)
     
-    #TODO: if needed do the overlimit case here
-    while blkcount > 0:
-        write_target = -1 #unassigned
-        write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)
-            
-        write_size = min(blkcount, PCACHE_UNIT - nextIdxPCacheN(idx_point // diskset_size))
-        #write to pcache
-        result.write("{} {} {} {} {}\n".format(time, devno, write_target, write_size, 0))
-        pcache[idx_point // diskset_size].append([float(blkno),float(write_size)])
-        #---------------
-        blkcount -= write_size
-        blkno += write_size
-        
-        if nextIdxPCacheN(idx_point // diskset_size) == PCACHE_UNIT:
-            if args.noclean: #NoClean just imagine the log is like a "circular buffer"
-                del pcache[idx_point // diskset_size][:] #basically this is tantamount to reset the offset to zero
-            else: #do cleanup!
-                if args.policy == "B":   
-                    cleanPCache(time,devno,idx_point // diskset_size)     
-                else: #args.policy == "A" or shelter
-                    cleanPCache(time,devno)
+    #start of the write part
+    write_target = (idx_point // diskset_size) * diskset_size + nextIdxPCacheN(idx_point // diskset_size)
+
+    result.write("{} {} {} {} {}\n".format(time, devno, write_target, blkcount, 0))
+    pcache[idx_point // diskset_size].append([float(blkno),float(blkcount)])
+    sectorsToEachLog[idx_point // diskset_size] += blkcount
+    #end of the write part
+
 
 def handleShelterWrite(time, devno, blkno, blkcount):
     global last_tail
 
     if (blkcount * 0.5) <= SMALL_IO_SIZE: #small request, use pcache
         handleDefaultWrite(time, devno, blkno, blkcount)
-    else: #bigIO
+    else: #bigIO, this part writes do not go to log
         #basically, just copy paste from read and some trivial changes
         blkno = computeDiskBlkNo(blkno)
-        while blkcount > 0:
-            #avoid a pcache if the request is on the edge
-            if blkno % (diskset_size) == 0:
-                blkno += PCACHE_UNIT
-
-            blktowrite = 0
-            nearesttop = (blkno // (diskset_size) + 1) * diskset_size
-
-            if nearesttop - blkno >= blkcount:
-                blktowrite = blkcount
-            else:
-                blktowrite = nearesttop % blkno
-            result.write("{} {} {} {} {}\n".format(time, devno, blkno, blktowrite, 0))
-            blkcount -= blktowrite
-            blkno += blktowrite
-
-        #shelter, bigIO, we know we should save the tail :)
-        last_tail = blkno - 1
+        result.write("{} {} {} {} {}\n".format(time, devno, blkno, blkcount, 0))
+        #end of the write part
+        if args.policy == "C": 
+            last_tail = (blkcount + blkno)
 
 # --------End of Read,Write,Clean--------
+
+# --------Start of Print Sectors to Log--------
+
+def printSectorsToLog():
+    target = open("out/" + str(sys.argv[1]).strip().split('/')[-1].split('.')[0] + "-logwrite.txt",'w')
+    for size in sectorsToEachLog:
+        target.write("%s\n" % int(size * 0.5))
+    target.close()
+
+# --------End of Print Sectors to Log--------
 
 # --------Start of User Messages--------
         
 def printConfiguration():
     print("------------Configuration------------")
-    print("Persistent cache size: " + str(TOTAL_PCACHE * SECTOR_SIZE / 1048576) + " MB")
-    print("Band size: " + str(BAND_SIZE * SECTOR_SIZE / 1048576) + " MB")
+    print("Persistent cache size: " + "%.3f" % (float(TOTAL_PCACHE * SECTOR_SIZE) / 1048576) + " MB")
+    print("Band size: " + "%.3f" % (float(BAND_SIZE * SECTOR_SIZE) / 1048576) + " MB")
     print("Bands that follow a persistent cache unit: " + str(band_unit))
     print("Total shelters: " + str(DISK_SIZE / diskset_size))
     print("-------------------------------------")
 
 def printSummary():
     print("------------Result Summary------------")
-    print("Number of clean: " + str(numberOfClean))
+    print("Number of clean or number of log reset: " + str(numberOfClean))
     print("Total writes to persistent cache: " + str(writesPutInPCache))
     print("Total read to disk: " + str(totalRead))
     print("Total sectors to persistent cache: " + str(sectorsPutInPCache))
@@ -289,11 +271,12 @@ if __name__ == "__main__":
         if flag == '1': #read
             handleRead(time, devno, blkno, blkcount)
         else: #write
-            if args.policy == "shelter":
+            if args.policy == "shelter" or args.policy == "C":
                 handleShelterWrite(time, devno, blkno, blkcount)
             else: #policy A or B
                 handleDefaultWrite(time, devno, blkno, blkcount)
         
     result.close()
     printSummary()
+    printSectorsToLog()
     
